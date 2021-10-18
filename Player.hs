@@ -17,6 +17,8 @@ import Parser.Instances
 import Data.Functor
 import Control.Applicative
 import Debug.Trace
+import Data.Maybe (isNothing)
+
 
 
 -- | This function is called once it's your turn, and keeps getting called until your turn ends.
@@ -246,6 +248,205 @@ changeFirst (x:xs) i r
 -------------------- MCTS TREE --------------------
 ---------------------------------------------------
 
+--reference: http://learnyouahaskell.com/zippers
+
+-- data CrumbInfo = CrumbI {node :: NodeInfo, r :: Tree}
+
+data Crumb = LeftCrumb NodeInfo Tree | RightCrumb NodeInfo Tree
+    deriving(Show)
+
+type Breadcrumbs = [Crumb]
+
+type Zipper = (Tree, Breadcrumbs)
+
+moveLeft :: Zipper -> Maybe Zipper
+moveLeft (None, _) = Nothing -- fail for empty tree
+moveLeft (Node (Children l r) info, bs) = Just (l, LeftCrumb info r :bs)
+
+moveRight :: Zipper -> Maybe Zipper
+moveRight (None, _) = Nothing -- fail for empty tree
+moveRight (Node (Children l r) info, bs) = Just (r, RightCrumb info l : bs)
+
+moveUp :: Zipper -> Maybe Zipper
+moveUp (_, []) = Nothing -- no breadcrumbs to follow fail
+moveUp (t, LeftCrumb info r : bs) = Just (Node (Children t r) info, bs)
+moveUp (t, RightCrumb info l : bs) = Just (Node (Children l t) info, bs)
+
+returnToRoot :: Maybe Zipper -> Maybe Zipper
+returnToRoot (Just (t, [])) = Just (t, [])
+returnToRoot (Just z) = returnToRoot (moveUp z)
+returnToRoot Nothing = Nothing
+
+
+modifyNode :: (MCInfo -> MCInfo) -> Zipper -> Maybe Zipper
+modifyNode f (Node c (NodeInfo nid mcInfo), bs) = Just (Node c (NodeInfo nid (f mcInfo)), bs)
+modifyNode _ _ = Nothing
+
+
+findAtLevel :: NodeID -> Zipper -> Maybe Zipper
+findAtLevel nid z@(t, _)
+    | found = Just z
+    | not found = moveRight z >>= findAtLevel nid
+    where
+        found = foundNode t nid
+findAtLevel _ _ = Nothing
+
+start :: Zipper
+start = (mct, [])
+
+findDealer :: Maybe Zipper
+findDealer = findAtLevel "2" start
+
+findCardNum :: Maybe Zipper
+findCardNum = findAtLevel "3" (cardNumTree2, [])
+
+modifyCardNum3 :: Maybe Zipper
+modifyCardNum3 = do
+    node <- findCardNum
+    returnToRoot $ modifyNode incrementMCWins node
+
+incrementMCWins :: MCInfo -> MCInfo
+incrementMCWins NoMCInfo = NoMCInfo
+incrementMCWins info = info {wins = wins info + 1}
+
+attachLeft :: Tree -> Zipper -> Maybe Zipper
+attachLeft t (Node (Children None r) info, bs) = Just (Node (Children t r) info, bs)
+attachLeft _ _ = Nothing
+
+attachRight :: Tree -> Zipper -> Maybe Zipper
+attachRight t (Node (Children l None) info, bs) = Just (Node (Children l t) info, bs)
+attachRight _ _ = Nothing
+
+
+find :: GameState -> Maybe Zipper
+find (GState d num hInfo) = do
+    let start = (mct, [])
+    dealerZ <- findAtLevel (show d) start
+    cardNumNode <- findAtLevel (show num) =<< moveLeft dealerZ
+    findAtLevel (show hInfo) =<< moveLeft cardNumNode
+
+modifyAllInPath :: (MCInfo -> MCInfo) -> Zipper -> Maybe Zipper
+modifyAllInPath f z@(_, []) = modifyNode f z
+modifyAllInPath f z = do
+    modifiedNode <- modifyNode f z
+    goUp <- moveUp modifiedNode
+    modifyAllInPath f goUp
+    -- pure modifiedNode
+
+findAndModify :: (MCInfo -> MCInfo) -> GameState -> Maybe Zipper
+findAndModify f state = modifyAllInPath f =<< find state
+
+-- findAndModify4 = findAndModify incrementMCWins mockGSTate
+
+    -- modifyAllInPath =<< moveUp =<< (modifyNode f z)
+
+-- mockGSTate = GState 2 3 (HandInfo 4 False)
+
+-- TODO: make this an enumeration of GameState 
+
+data ActionState = AState {
+    gameState :: GameState,
+    pAction :: PureAction
+}
+
+pairs :: [ActionState]
+pairs = AState <$> (GState <$> dealerVals <*> cardNums <*> cardVals) <*> possibleActions
+
+checkLength = length pairs
+
+dealerVals :: [Int]
+dealerVals = [2..11]
+
+cardNums :: [Int]
+cardNums = [2..4]
+
+cardVals :: [HandInfo]
+-- cardVals = (createHandConditional (const True) <$> [4..21]) ++ (createHandConditional (>= 13) <$> [4..21])
+cardVals = considerHands =<< [4..21]
+-- cardVals = map' (>= 13) (\n -> [HandInfo n False, HandInfo n True])
+
+-- test = cardVals <$> cardNums
+
+-- !!!!!BIG TODO: PLEASE SIMPLIFY THIS!!!!!
+considerHands :: Int -> [HandInfo]
+considerHands n
+    | isEven && possibleAce = pair : ace : noAce
+    | isEven = pair : noAce
+    | possibleAce = ace : noAce
+    | otherwise = noAce
+    where
+        isEven = even n
+        possibleAce = possibleAceRange n
+        noAce = [basicHand n]
+        pair = pairHand n
+        ace = aceHand n
+
+possibleActions = [PHit, PStand, PDoubleDown, PSplit, PInsurance]
+
+
+createLevel :: [String] -> Tree
+createLevel [] = None
+createLevel [x] = Node noChildren (NodeInfo x defaultMCInfo)
+createLevel (x:xs) = Node (Children None (createLevel xs)) (NodeInfo x defaultMCInfo)
+
+createLevelBelow :: [String] -> Tree -> Tree
+createLevelBelow nids None = createLevel nids
+createLevelBelow nids t@(Node c _) = t {children=c{left=createLevel nids}}
+
+test = createLevel $ show <$> dealerVals
+test2 = createLevelBelow (show <$> cardNums) test
+
+testFmapL = fmapL (createLevelBelow (show <$> cardNums)) test
+
+fmapL :: (Tree -> Tree) -> Tree -> Tree
+fmapL _ None = None
+fmapL f t@(Node (Children _ None) _) = f t
+fmapL f t@(Node (Children _ r) _) = resTree {children=resChildren{left=resL, right=fmapL f r} }
+    where
+        resTree = f t
+        resChildren = children resTree
+        resL = left resChildren
+
+
+
+getLeftChild :: Tree -> Tree
+getLeftChild = left . children
+
+getRightChild :: Tree -> Tree
+getRightChild None = None
+getRightChild (Node (Children _ r) _) = r
+
+
+-- considerActions :: GState -> PossibleActions
+-- considerActions (d cNum (HandInfo a p val))
+--     |
+--     where
+--         defaultActions = [PHit, PStand]
+
+
+-- considerAce n = if n >= 13 then possibleAce n else noAce n
+--     where
+--         possibleAce n = createHandWithAce n : noAce n
+--         noAce n = [createHandNoAce n]
+
+basicHand :: Int -> HandInfo
+basicHand = HandInfo False False
+
+pairHand :: Int -> HandInfo
+pairHand = HandInfo False True
+
+aceHand :: Int -> HandInfo
+aceHand = HandInfo True False
+
+possibleAceRange n = n >= 13 && n < 21
+
+-- createHandConditional :: (Int -> Bool) -> Int -> HandInfo
+-- createHandConditional f n = HandInfo n (f n)
+-- dealerVals = undefined 
+-- dealerVals = (\num -> HandInfo num (num == 11)) <$> [1..11]
+
+-- test = [1..11] >>= (\n -> pure n)
+-- num >>= (num==11) >>= HandInfo
 -- data Node = Node {
 --     left :: Tree,
 --     right :: Tree,
@@ -285,9 +486,9 @@ data MCInfo = NoMCInfo | MCInfo {
     wins :: Int, numSimsThisNode :: Int, numSimsSubtreeTotal :: Int }
 
 -- data NodeValue = Val Int | Act PureAction
-
+type NodeID = String
 data NodeInfo = NoNodeInfo | NodeInfo {
-    nid :: String, mcInfo :: MCInfo}
+    nid :: NodeID, mcInfo :: MCInfo}
 
 data Children = Children {left :: Tree, right :: Tree}
 
@@ -295,6 +496,8 @@ data Tree = None | Node {
     children :: Children,
     nodeInfo :: NodeInfo
 }
+
+-- instance Functor
 
 test0 :: Tree
 test0 = Node (Children None None) NoNodeInfo
@@ -324,11 +527,12 @@ cardValTree = defaultTree {nodeInfo = defaultNodeInfo {nid="4"}}
 noChildren :: Children
 noChildren = Children None None
 
-data HandInfo = HandInfo {val :: Int, hasAce :: Bool}
+data HandInfo = HandInfo {hasAce :: Bool, hasPair :: Bool, val::Int}
 
 instance Show HandInfo where
-    show (HandInfo v a) = show v ++ aceStr
+    show (HandInfo a p v) = show v ++ aceStr ++ pairStr
         where
+            pairStr = if p then "P" else ""
             aceStr = if a then "A" else ""
 
 data GameState = GState {
@@ -337,28 +541,72 @@ data GameState = GState {
     curHand :: HandInfo -- should be smth like "4" or "4A" if has Ace
 }
 
-exGState = GState 2 3 (HandInfo 4 False)
+-- exGState = GState 3 3 (HandInfo 4 False)
 
-findState :: GameState -> Maybe Tree
-findState (GState d n h) = do 
-    l1 <- getLeftTree <$> findNodeAtLevel mct d
-    l2 <- getLeftTree <$> findNodeAtLevel l1 n
-    findNodeAtLevel l2 h
-    -- pure l2
+-- findState :: GameState -> Maybe Tree
+-- -- TODO: use =<<[d n h]
+-- findState (GState d n h) = do
+--     -- l1 <- getLeftTree <$> findNodeAtLevel mct d
+--     -- l1 <- findNodeAtLevel mct d
 
-testFindState = findState exGState
+--     l1 <- getLeftTree <$> findNodeAtLevel mct d
+--     -- if isNothing l1 then putStrLn "Nothing" else putStrLn "dealer found"
+--     l2 <- getLeftTree <$> findNodeAtLevel l1 n
+--     findNodeAtLevel l2 h
+--     -- pure l2
 
-findNodeAtLevel :: Show a => Tree -> a -> Maybe Tree
-findNodeAtLevel None _ = Nothing
-findNodeAtLevel t item = if foundNode then Just t else findNodeAtLevel (getRightTree t) item
-    where
-        foundNode = show item == nid (nodeInfo t)
+-- testFindState = findState exGState
+
+-- findOrCreate :: Tree -> a -> Maybe Tree
+-- findOrCreate t item = 
+--     if foundNode
+--         then findNodeAtLevel t item
+--         else 
+
+-- findFromSubtree :: Tree -> Maybe Tree  -> a -> Maybe Tree
+-- findFromSubtree prev Nothing i = Undefined
+-- findFromSubtree _ (Just t) i = getLeftTree <$> findNodeAtLevel t i
+
+--creates Node at the same level as the input tree node
+-- createNodeAtLevel :: Tree -> a -> Maybe Tree
+-- createNodeAtLevel None i = Just $ Node noChildren $ setId i
+-- createNodeAtLevel p@(Node (Children l r) _) i = 
+--     let
+--         newNode = Node {children=setRightChild r, nodeInfo=setId i}
+--         parentNode = p {children=Children l newNode}
+--     in 
+--         Just parentNode
+-- creates a child node as the child of the input tree node
+-- createNodeBelowLevel 
+
+-- findNodeAtLevel :: Show a => Tree -> a -> Maybe Tree
+-- findNodeAtLevel None _ = Nothing
+-- findNodeAtLevel t item
+--     -- if foundNode then Just t else findNodeAtLevel (getRightTree t) item
+--     | found || isNothing retVal = Just t
+--     | otherwise = retVal
+--     where
+--         found = foundNode t item
+--         retVal = findNodeAtLevel (getRightTree t) item
 
 getLeftTree :: Tree -> Tree
 getLeftTree = left . children
 
 getRightTree :: Tree -> Tree
 getRightTree = right . children
+
+foundNode :: Tree -> String -> Bool
+foundNode None _ = False
+foundNode t s = nid (nodeInfo t) == s
+
+setLeftChild :: Tree -> Children
+setLeftChild = flip Children None
+
+setRightChild :: Tree -> Children
+setRightChild = Children None
+
+setId :: Show a => a -> NodeInfo
+setId = (`NodeInfo` NoMCInfo) . show
 
 -- testT = findNodeAtLevel cardNumTree2 3
 
@@ -399,7 +647,11 @@ instance Show Tree where
     show None = "None\n"
     show (Node c n) = "(\n" ++ show n ++ show c ++ ")\n"
 
-
+instance Show GameState where
+    show (GState d cNum hInfo) =
+        "Dealer: "++ show d
+        ++ "Card num: " ++ show cNum
+        ++ "Hand Info: " ++ show hInfo
 -- test2 = Node (Children test0 test1) (NodeInfo 4 5 6 NoHandInfo)
 
 
@@ -435,3 +687,6 @@ instance Show Tree where
 -- }
 
 -- data MCT = 
+
+singleton :: a -> [a]
+singleton i = [i]
