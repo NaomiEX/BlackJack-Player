@@ -54,6 +54,8 @@ playCard (Just dealer) pts info pid (Just mem) h =
     trace(
         "-----Player----- " ++ pid ++"\n"++
         "Points: "++ show pts ++ "\n" ++
+        "Hand: " ++ show h ++
+        "Player Info: " ++ show info ++
         "Memory: " ++ mem
     )
     -- playerAction mem dealer h
@@ -74,7 +76,9 @@ evalBid :: Maybe String -> [PlayerPoints] -> PlayerId -> Hand -> CompleteAction
 evalBid Nothing pts pid h = (Bid defaultBid, retMem)
     where
         retMem = storeStartOfRound Nothing pts pid h
-evalBid m@(Just mem) pts pid h = (Bid bidAmt, mem ++ retMem)
+evalBid m@(Just mem) pts pid h =
+    trace("PLAYER POINTS::: " ++ show pts)
+     (Bid bidAmt, mem ++ retMem)
     where
         hist = getHistory mem
         isSim = isSimulation hist
@@ -96,40 +100,49 @@ memoryIsEmpty = null . playerMem
 getHistory :: String -> History
 getHistory = extractFromParseResult mempty . parse parseHistory
 
-rState = RoundM [] [11, 1] 0 200 2
-rState2 = RoundM [PHit] [11, 1, 3] 0 200 4
-rState3 = RoundM [] [2,2] 0 200 2
-rState4 = RoundM [] [2,2] 0 200 11
-rState5 = RoundM [PHit] [2,2] 0 200 11
-rState6 = RoundM [PDoubleDown] [2,2] 0 200 11
-rState7 = RoundM [PDoubleDown, PHit] [2,2] 0 200 11
-rState8 = RoundM [PDoubleDown, PHit, PStand] [2,2] 0 200 11
+-- rState = RoundM [] [11, 1] 0 200 2
+-- rState2 = RoundM [PHit] [11, 1, 3] 0 200 4
+-- rState3 = RoundM [] [2,2] 0 200 2
+-- rState4 = RoundM [] [2,2] 0 200 11
+-- rState5 = RoundM [PHit] [2,2] 0 200 11
+-- rState6 = RoundM [PDoubleDown] [2,2] 0 200 11
+-- rState7 = RoundM [PDoubleDown, PHit] [2,2] 0 200 11
+-- rState8 = RoundM [PDoubleDown, PHit, PStand] [2,2] 0 200 11
 
+rState1 = RoundM [] [10, 10] [Jack, Jack] 1000 20 2 Nothing
 
 -- !!!BIG TODO: PLEASE FIND A BETTER WAY TO DO THIS
-legalActions :: RoundMem -> [PureAction]
-legalActions (RoundM acts hand _ bid dealer _)=finalAction
+legalActions :: RoundMem ->Hand -> [PureAction]
+legalActions rMem@RoundM {roundActions, roundDealer} hand = finalAction
     where
         defaultActions = [PHit, PStand]
-        includeInsurance = [PInsurance | dealer == 11 && null acts]
-        includeSplit = [PSplit | isPair hand]
+        includeInsurance = [PInsurance | roundDealer == 11 && null roundActions]
+        includeSplit = [PSplit | handIsPair hand]
         includeDoubleDown = [PDoubleDown | length hand == 2]
-        finalAction = if elem PDoubleDown $ take 2 $ reverse acts then if (==PHit) $ head $ take 1 $ reverse acts
-         then [PStand] else [PHit]
+        -- if double down is one of the last 2 actions and if hit is the most recent action then stand otherwise hit
+        finalAction = if elem PDoubleDown $ take 2 $ reverse roundActions then if (==PHit) $ head $ take 1 $ reverse roundActions
+         then
+             if length hand > 2 -- did not bust after hitting (only relevant for splits when if the previous one busts it doesnt get passed to bid)
+                 then [PStand]
+                 else defaultActions ++ includeInsurance ++ includeSplit ++ includeDoubleDown else [PHit]
             else defaultActions ++ includeInsurance ++ includeSplit ++ includeDoubleDown
 
-
 -- testEncodeCurState = encodeCurState (History NoSetup [RoundM [PStand] [2, 10] 1000 100 2]) (Card Spade Nine) [Card Diamond Ace, Card Heart Four, Card Spade Jack]
+
 -- add the dealer card and your hand before performing action
 encodeCurState :: History -> Card -> Hand -> String
 encodeCurState hist@(History _ playerMem) dCard pHand
-    | null playerMem || storeAll = dCardEncoding ++ (encodeCard =<< pHand)
+    | null playerMem || storeAll = dCardEncoding ++ fold (show . getRank <$> pHand)
     | otherwise = newCard
     where
         dCardEncoding = encodeCard dCard
         newCard = encodeNewCard hist pHand
         mostRecent = mostRecentRound playerMem
+        -- ranks = roundRanks mostRecent
         storeAll = (==0) (roundBid mostRecent) && null (roundHand mostRecent)
+
+
+-- notFirstRound :: History -> Bool
 
 -- testUMAP = updateMemAndPlay "?100BH/1000$90B23H4" (Card Spade Nine) [Card Diamond Four, Card Heart Four]
 
@@ -143,7 +156,7 @@ updateMemAndPlay oldMem dCard pHand = completeAction
 -- for Non-bid actions
 playerAction :: String -> Card -> Hand -> CompleteAction
 -- playerAction Nothing _ = defaultCompleteAction -- memory should never be nothing in non-bid rounds
-playerAction mem dealerCard hand
+playerAction mem dealerCard playerHand
     | trace(
         "Updated Memory:" ++ mem ++
         "History: "++ show hist) False = undefined
@@ -156,19 +169,20 @@ playerAction mem dealerCard hand
     -- in a simulation but not the first turn, no need to update tree (will be updated outside of simulation), choose random actions
     | isSimulation hist && not (hasSimulatedAction hist) =
         trace("IN SIMULATION BUT NO MORE SIMULATED ACTIONS" ++
-        "LEGAL ACTIONS: " ++ show ( legalActions $ mostRecentRound $ playerMem hist) ++ "\n"++
+        "LEGAL ACTIONS: " ++ ( if null $ playerMem hist then "" else show $ legalActions (mostRecentRound $ playerMem hist) playerHand) ++ "\n"++
         "RANDOM ACTION" ++ show randomAction
         )
         (randomAction, mem ++ randActionEncoding)
     -- in a simulation but not the first turn, choose random actions
-    | otherwise = undefined -- Store memory data into tree, then Get action from tree
+    | otherwise = mcts mem (playerMem hist) dealerCard playerHand-- Store memory data into tree, then Get action from tree
     where
         hist = getHistory mem
         (simAction, simEncoding) = performSimAction hist
-        (randomAction, randActionEncoding) = getRandomAction hist hand
+        (randomAction, randActionEncoding) = getRandomAction hist playerHand
         -- storeDealer = if missingDealerCard $ mostRecentRound $ playerMem hist then encodeCard dealerCard else ""
         -- updatedMem = mem ++ storeDealer ++ encodeNewCard hist hand
         -- updatedMem = mem ++ storeDealer ++ encodeNewCard hist hand
+
 
 -- playerAction :: String -> Card -> Hand -> CompleteAction
 -- -- playerAction Nothing _ = defaultCompleteAction -- memory should never be nothing in non-bid rounds
@@ -214,7 +228,7 @@ getRandomAction history hand = (fromMaybe defaultAction randomAction, show pureR
     where
         curRound = mostRecentRound $ playerMem history
         randSeed = getRandSeed curRound hand
-        validActions = legalActions curRound
+        validActions = legalActions curRound hand
         pureRandAction = chooseRandomAction randSeed validActions
         randomAction = pureActionToAction pureRandAction $ roundBid curRound
 
@@ -226,23 +240,98 @@ missingDealerCard :: RoundMem -> Bool
 missingDealerCard = (==0) . roundDealer
 
 
-dealerCard = Card Spade Two
-playerHand = [Card Heart Five, Card Diamond Two, Card Spade Four]
-roundMem = RoundM [PHit] [5, 2, 4] 1000 200 2
+-- dealerCard = Card Spade Two
+-- playerHand = [Card Heart Five, Card Diamond Two, Card Spade Four]
+-- roundMem = RoundM [PHit] [5, 2, 4] 1000 200 2
 
 -- testGetAction = getActionFromMCT dealerCard playerHand roundMem
 
-getActionFromMCT :: Card -> Hand -> RoundMem -> Action
-getActionFromMCT dealerCard hand roundMem = fromMaybe defaultAction action
+testStrMem = "/12$91B485H6SWin/29$28B777DH2SLoss/48$22B845"
+testMemMCTS = playerMem $ getHistory testStrMem
+
+card = Card Spade Eight
+
+hand = [Card Diamond Four, Card Heart Five]
+
+testMCTS = mcts testStrMem testMemMCTS card hand
+
+mcts :: String -> Memory -> Card -> Hand -> Encoding Action
+mcts strMem mem dealerCard playerHand = fromMaybe (defaultAction, "") action
+    where
+        action = do
+            let (cur:rest) = mem
+            prevRoundGameStates <- memoryToGameState rest
+            (updatedMCT, _) <- storeMemoryInMCT prevRoundGameStates
+            (suggestedAction, pureAct) <- getActionFromMCT dealerCard playerHand cur updatedMCT
+            let randState = getRandSeed cur playerHand
+            simInfos <- simulateNTimes 50 cur pureAct randState
+            updatedMem <- encodeSimulations strMem simInfos
+            pure (suggestedAction, updatedMem)
+
+-- update memory string to include simulation info
+encodeSimulations :: String -> [SimInfo] -> Maybe String
+encodeSimulations memStr allSimMem = do
+    simStr <- traverse encodeSingleSimulation allSimMem
+    (reversedCur, reversedRest) <- splitAtFirst '/' $ reverse memStr
+    pure $ reverse reversedRest ++ tail (fold simStr) ++  "/" ++ reverse reversedCur
+    -- ""
+    -- where
+    --     simStr = fromMaybe "" $ traverse encodeSingleSimulation allSimMem
+    --     (reversedCur, reversedRest) = splitAtFirst '/' $ reverse memStr
+    --     updatedPrev = (reverse reversedRest) ++ simStr
+
+splitAtFirst :: Eq a => a -> [a] -> Maybe ([a], [a])
+splitAtFirst x l= case elemIndex x l of
+    (Just i) -> Just $ splitAt i l
+    Nothing -> Nothing
+
+-- unread :: Char -> String -> Maybe String
+-- unread _ "" = Nothing
+-- unread c str@(char:rest) = if c == char then Just str else unread c rest
+
+
+testEncodeSim = encodeSingleSimulation $ RoundM [PStand, PHit] [5,2, 10] [Five, Two, King] 482 10 9 (Just Win)
+
+-- make this RoundMem instance of show
+encodeSingleSimulation :: SimInfo -> Maybe String
+encodeSingleSimulation (RoundM simActs _ simRanks simPts simBid simDealer simOutcome) = do
+    dRank <- generateRankFromVal simDealer
+    sRes <- simOutcome
+    let allActs = fold $ show <$> simActs
+        allRanks = fold $ show <$> simRanks
+    pure $ "/" ++ show simPts ++ "$" ++
+        show simBid ++ "B" ++
+        show dRank ++
+        allRanks ++
+        allActs ++
+        show sRes
+    -- let
+    --     retStr = (\dRank -> "/" ++ show simPts ++ "$" ++ 
+    --         show simBid ++ "B" ++ 
+    --         show dRank ++ 
+    --         show simRanks ++ 
+    --         show simActs ++ 
+    --         show simOutcome) =<< generateRankFromVal simDealer
+    -- in pure retStr
+
+
+getActionFromMCT :: Card -> Hand -> RoundMem -> Tree -> Maybe (Action, PureAction)
+getActionFromMCT dealerCard hand roundMem tree = action
     where
         gameState = getCurrentGameState dealerCard hand
-        possibleActionIDs = show <$> legalActions roundMem
+        possibleActionIDs = show <$> legalActions roundMem hand
+        -- seedFromHand = getRandSeed roundMem hand
         action = do
-            gameStateTree <- findSubTree gameState mct  -- tree corresponding to the current game state
+            gameStateTree <- findSubTree gameState tree  -- tree corresponding to the current game state
             actionSpace <- moveLeft gameStateTree
             chosenActionTree <- getActionOnLargestUCB actionSpace possibleActionIDs
             let actionTree =  getTree chosenActionTree
             actionTreeToAction roundMem actionTree
+            -- simResult <- simulateNTimes 50 roundMem pureActionFromTree seedFromHand
+            -- pure actionFromTree
+
+
+
         -- action = fromMaybe defaultAction $ actionTreeToAction roundMem actionTree
 
 -- playerAction (Just s) = case parse strictParseAll s of
@@ -345,10 +434,12 @@ charToPureAction :: Char -> Maybe PureAction
 charToPureAction c = snd <$> pair
     where pair = find ((==c) . fst) actionMapping
 
+type CardInfo = (Char, Int)
 
 data RoundMem = RoundM {
     roundActions :: [PureAction],
     roundHand :: [Int],
+    roundRanks :: [Rank],
     roundStartPts :: Points,
     roundBid :: Int,
     roundDealer :: Int,
@@ -356,9 +447,10 @@ data RoundMem = RoundM {
 }
 
 instance Show RoundMem where
-    show (RoundM a h p b d out) =
+    show (RoundM a h r p b d out) =
         "Actions this round: " ++ show a ++
         "  Hands this round: "++ show h ++
+        "  Ranks in hand: " ++ show r ++
         "  Points at start of round: " ++ show p ++
         "  Bids this round: " ++ show b ++
         "  Dealer's first card this round: " ++ show d ++
@@ -385,11 +477,11 @@ showLstHead [] = ""
 
 -- there should only be one dealer and bid, so just take the first instance
 instance Semigroup RoundMem where
-    (<>) (RoundM a1 h1 p1 b1 d1 out1) (RoundM a2 h2 p2 b2 d2 out2) =
-        RoundM (a1++a2) (h1++h2) (max p1 p2) (max b1 b2) (max d1 d2) (max out1 out2)
+    (<>) (RoundM a1 h1 r1 p1 b1 d1 out1) (RoundM a2 h2 r2 p2 b2 d2 out2) =
+        RoundM (a1++a2) (h1++h2) (r1++r2) (max p1 p2) (max b1 b2) (max d1 d2) (max out1 out2)
 
 instance Monoid RoundMem where
-    mempty = RoundM [] [] 0 0 0 Nothing
+    mempty = RoundM [] [] [] 0 0 0 Nothing
 
 type Memory = [RoundMem]
 
@@ -455,11 +547,24 @@ parseAll f = do
 -- parseOutcome :: Parser Outcome
 -- parseOutcome 
 
+strRankMapping :: [(Char, Rank)]
+strRankMapping = flip zip [Ace ..] $ head . show <$> [Ace ..]
+
+strToRank :: Char -> Maybe Rank
+strToRank str = snd <$> pair
+    where
+        pair = find ((==str).fst) strRankMapping
+
 memInitializeAction :: PureAction -> RoundMem
 memInitializeAction act = mempty {roundActions=[act]}
 
-memInitializeHand :: Int -> RoundMem
-memInitializeHand h = mempty {roundHand=[h]}
+memInitializeHand :: CardInfo -> RoundMem
+memInitializeHand (str, val) = resultingMem $ strToRank str
+    where
+        resultingMem :: Maybe Rank -> RoundMem
+        resultingMem Nothing = mempty
+        resultingMem (Just r) = mempty {roundHand=[val], roundRanks=[r]}
+
 
 -- memInitializeDealer :: Int -> RoundMem
 -- memInitializeDealer d = mempty {roundDealer=d}
@@ -471,7 +576,7 @@ memInitializeHand h = mempty {roundHand=[h]}
 -- memInitializePts pts = mempty {roundStartPts=pts}
 
 memInitializeRound :: Points -> Int -> Int -> Maybe Outcome -> RoundMem
-memInitializeRound = RoundM [] []
+memInitializeRound = RoundM [] [] []
 
 parseMemList :: Parser RoundMem -> Parser RoundMem
 parseMemList p1 = parseMemList1 p1 ||| pure mempty
@@ -499,11 +604,11 @@ parseMoreMem :: Parser RoundMem
 parseMoreMem = do
     pts <- parseNumAndSeparator '$'
     bid <- parseNumAndSeparator 'B'
-    dealer <- parseHand
+    (_, dealer) <- parseHand
     tm <- parseMemList parseMem
     out <- list parseOutcome
     let roundOutcome = if null out then Nothing else Just $ head out
-        updatedTm = replaceLatestHand tm <$> fromMaybe [] $ evaluateAce (roundHand tm)
+        updatedTm = replaceLatestHand tm <$> fromMaybe (roundHand tm) $ evaluateAce (roundHand tm)
         ret = updatedTm <> memInitializeRound pts bid dealer roundOutcome
     pure ret
 
@@ -514,7 +619,7 @@ parseOutcome :: Parser Outcome
 parseOutcome = foldr1 (|||) $ mapping stringConverter outcomeMapping
 -- parseOutcome = foldr1 (|||) $ traverse is . show <$> [Win ..]
 
-stringConverter :: Converter String a
+stringConverter :: Converter String a a
 stringConverter str r = traverse_ is str >> pure r
 
 outcomeMapping :: [(String, Outcome)]
@@ -553,7 +658,7 @@ replaceLatestHand mem newHand = mem {roundHand= newHand}
 -- test = liftM2 (++) [[1]] [[2]] 
 
 handMapping :: [(Char, Int)]
-handMapping = [('A', 11), ('T', 10)]
+handMapping = [('A', 11), ('T', 10), ('J', 10), ('K', 10), ('Q', 10)]
 
 valToSymbol :: Int -> Maybe Char
 valToSymbol val = fst <$> pair
@@ -591,10 +696,10 @@ valToSymbol val = fst <$> pair
 parseMemAction :: Parser PureAction
 parseMemAction = foldr (|||) (head pureAction) pureAction
 
-parseHand :: Parser Int
-parseHand = parseSpecialHand ||| parseDigit
+parseHand :: Parser CardInfo
+parseHand = parseSpecialHand ||| parseNumericHand
 
-parseSpecialHand :: Parser Int
+parseSpecialHand :: Parser CardInfo
 parseSpecialHand = foldr (|||) (head handVal) handVal
 
 
@@ -603,16 +708,22 @@ parseSpecialHand = foldr (|||) (head handVal) handVal
 pureAction :: [Parser PureAction]
 pureAction = convertTypeChar actionMapping
 
-handVal :: [Parser Int]
-handVal = convertTypeChar handMapping
+pairConverter :: Char -> b -> Parser (Char, b)
+pairConverter c r = is c >> pure (c, r)
+
+handVal :: [Parser CardInfo]
+handVal = convertToPair handMapping
+
+convertToPair :: [(Char, a)] -> [Parser (Char, a)]
+convertToPair = mapping pairConverter
 
 convertTypeChar :: [(Char, a)] -> [Parser a]
 convertTypeChar = mapping charConverter
 
-mapping :: Converter a b -> [(a, b)] -> [Parser b]
+mapping :: Converter a b c -> [(a, b)] -> [Parser c]
 mapping f l = uncurry f <$> l
 
-type Converter a b = a -> b -> Parser b
+type Converter a b c = a -> b -> Parser c
 -- type CharConverter a = Char -> a -> Parser a
 
 -- if it is that character convert it to a Parser of the given PureAction
@@ -620,7 +731,10 @@ type Converter a b = a -> b -> Parser b
 -- isAction c act = is c >> pure act
 
 -- parseHand = ace ||| ten ||| parseDigit
-
+parseNumericHand :: Parser (Char, Int)
+parseNumericHand = do
+    digit <- parseDigit
+    pure (head $ show digit, digit)
 
 parseDigit :: Parser Int
 -- TODO: dont allow 0 by using elem and \\ (list difference)
@@ -631,7 +745,7 @@ parseDigit = satisfy isDigit <&> digitToInt
 -- isSpecialDigit :: CharConverter Int
 -- isSpecialDigit = charConverter
 
-charConverter :: Converter Char a
+charConverter :: Converter Char a a
 charConverter c r = is c >> pure r
 
 satisfy :: (Char -> Bool) -> Parser Char
@@ -783,6 +897,7 @@ storeStartOfRound (Just mem) allPts pId pHand=
         prevOutcome = getPrevOutcome playerMem curRoundStartPts
         defaultStr :: Int -> String
         defaultStr bid = "/" ++ show curRoundStartPts ++ "$" ++ show bid ++ "B"
+
         retStr = if isSimulation h then defaultStr $ simBid sim
             else show prevOutcome ++ defaultStr defaultBid
     in
@@ -815,12 +930,19 @@ storeAction mem act = mem ++ show act
 -- take in memory add in any new cards
 encodeNewCard :: History -> Hand -> String
 encodeNewCard hist h
-    | toUpdate = encodeCard $ head h
+    | trace ("IN ENCODE CARD:" ++ show h) False = undefined
+    | null roundMems || toUpdate = encodeCard $ head h
     | otherwise = ""
     where
         roundMems = playerMem hist
         mostRecentHand = if null roundMems then [] else roundHand $ mostRecentRound roundMems
         toUpdate = length h /= length mostRecentHand
+
+testPerformedSplit = RoundM [PSplit] [5,4] [Five, Four] 1000 22 10 Nothing
+
+-- check if 
+performedSplit :: RoundMem -> Bool
+performedSplit = elem PSplit . roundActions
 
 encodeCard :: Card -> String
 encodeCard card = case valToSymbol $ toPoints card of
@@ -856,34 +978,67 @@ rankToVal r
 
 testCurrentGameState = getCurrentGameState (Card Spade Four) testHand2
 
-testRMem = RoundM [PHit, PStand] [4, 3, 9] 1000 200 7 (Just Win)
+-- testRMem = RoundM [PHit, PStand] [4, 3, 9] 1000 200 7 (Just Win)
 
-testRMtoGS = roundMemToGameState testRMem (Just []) []
+-- testRMtoGS = roundMemToGameState testRMem (Just []) []
 
--- to convert all prev round mem to game states, doesnt do it for current rount see getCurrentGameState
+testRM1 = RoundM [PHit, PStand] [9, 2, 4] [Nine, Two, Four] 1000 200 8 (Just Win)
+testRM2 = RoundM [PHit, PHit] [10, 2, 8] [Jack, Two, Eight] 1000 200 11 (Just Loss)
+testRM3 = RoundM [PDoubleDown, PHit, PStand] [10, 2, 7] [Queen, Two, Seven] 1000 200 4 (Just Draw)
+testRM5 = RoundM [PHit, PStand] [10,5, 4] [Ten, Five, Four] 1000 200 4 (Just Win)
+
+testRM4 = RoundM [PSplit, PHit, PStand] [4, 4, 9] [Four, Four, Nine] 1000 200 8 (Just Win)
+
+testConversion = roundMemToGameState testRM4 (Just []) []
+
+testMem = [testRM1, testRM2, testRM3, testRM4, testRM5]
+
+testAllConversion = memoryToGameState testMem
+
+-- convert all previous rounds in memory to gamestate
+memoryToGameState :: Memory -> Maybe [[GameState]]
+memoryToGameState = mapM roundMemConversion
+    where
+        roundMemConversion cur = roundMemToGameState cur (Just []) []
+
+-- to convert a single round to game states, doesnt do it for current rount see getCurrentGameState
 roundMemToGameState :: RoundMem -> Maybe [GameState] -> [Int] ->Maybe [GameState]
 roundMemToGameState _ Nothing _= Nothing
 -- processed all the actions and all cards
 -- roundMemToGameState (RoundM [] _ _ _ _ _) gStateSoFar _= gStateSoFar
 roundMemToGameState RoundM {roundActions=[]} gStateSoFar _= gStateSoFar
 roundMemToGameState rMem _ []= roundMemToGameState rMem (Just []) (take 2 $ roundHand rMem)
-roundMemToGameState rMem@(RoundM acts hand _ _ dealerVal _) gStateSoFar handForAction=
-    roundMemToGameState rMem{roundActions=rest} updatedGStateSoFar newHandForAction
+roundMemToGameState rMem@RoundM{roundActions, roundHand, roundDealer, roundOutcome} gStateSoFar handForAction
+    | performedSplit rMem = Just [splitGState]
+    | otherwise =
+        trace ("ROUND ACTIONS: " ++ show roundActions ++
+        " Action being processed: "++ show action ++
+        " cards Obtained: " ++ show cardsObtained ++
+        " Passed in hand: " ++ show handForAction ++
+         "  New hand: " ++ show newHandForAction)
+        roundMemToGameState rMem{roundActions=rest} updatedGStateSoFar newHandForAction
     where
-        (action : rest) = acts
+        -- for split
+        splitCards = take 2 roundHand
+        splitHandInfo = HandInfo (isSoft splitCards) True (sum splitCards)
+        splitGState = GState roundDealer (length splitCards) splitHandInfo (Just PSplit) roundOutcome
+        -- for non split
+        -- action = last roundActions
+        -- rest = take (length roundActions-1) roundActions
+        (action:rest) = roundActions
         numCards = length handForAction
-        handInfo = HandInfo (isSoft handForAction) (isPair handForAction) (sum handForAction)
+        handInfo = HandInfo (isSoft handForAction) (isPair rMem) (sum handForAction)
         cardsObtained = numCardObtainedFromAction action
-        newHandForAction = handForAction ++ take cardsObtained (drop numCards hand)
-        newGameState = GState dealerVal numCards handInfo (Just action)
+        newHandForAction = handForAction ++ take cardsObtained (drop numCards roundHand)
+        newGameState = GState roundDealer numCards handInfo (Just action) roundOutcome
         updatedGStateSoFar :: Maybe [GameState]
         updatedGStateSoFar = do
             state <- gStateSoFar
             pure $ newGameState : state
 
-currentRound = RoundM [] [9, 2] 1000 293 2
+-- currentRound = RoundM [] [9, 2] 1000 293 2
 
-otherRound = RoundM [PDoubleDown, PHit, PStand] [11, 2, 6] 2000 12 11
+-- otherRound = RoundM [PDoubleDown, PHit, PStand] [11, 2, 6] 2000 12 11
 
 -- testMemory = [currentRound,testRMem, otherRound]
 
@@ -911,7 +1066,7 @@ testFind = findSubTree testGState mct
 
 -- convert state for the current round to GameState
 getCurrentGameState :: Card -> Hand -> GameState
-getCurrentGameState dealerCard pHand = GState dCardVal handLen handInfo Nothing
+getCurrentGameState dealerCard pHand = GState dCardVal handLen handInfo Nothing Nothing
     where
         dCardVal = rankToValDeck 0 (getRank dealerCard)
         handLen = length pHand
@@ -941,10 +1096,17 @@ handIsPair h = length h == 2 && c1 == c2
         intVals = rankToVal . getRank <$> h
         [c1, c2] = intVals
 
-isPair :: [Int] -> Bool
-isPair l = length l == 2 && c1 == c2
+-- have to have exactly 2 cards and same rank and same value
+isPair :: RoundMem -> Bool
+isPair RoundM {roundActions, roundHand, roundRanks} = length roundHand == pairLen && c1 == c2
     where
-        [c1, c2] = l
+        numSplits = count PSplit roundActions
+        pairLen = 2 + numSplits
+        [c1 , c2] = drop numSplits $ zip roundHand roundRanks
+
+-- count occurrences of a value in a list
+count :: Eq a => a -> [a] -> Int
+count val = foldr (\cur acc -> if cur == val then acc + 1 else acc) 0
 
 
 
@@ -1053,11 +1215,12 @@ findCardNum = findAtLevel "3" (cardNumTree2, [])
 modifyCardNum3 :: Maybe Zipper
 modifyCardNum3 = do
     node <- findCardNum
-    returnToRoot $ modifyNode incrementMCWins node
+    returnToRoot $ modifyNode (incrementMCWins 1) node
 
-incrementMCWins :: MCInfo -> MCInfo
-incrementMCWins NoMCInfo = NoMCInfo
-incrementMCWins info = info {wins = wins info + 1}
+-- partially apply to use in tree funcs
+incrementMCWins :: Float -> MCInfo -> MCInfo
+incrementMCWins _ NoMCInfo = NoMCInfo
+incrementMCWins n info = info {wins = wins info + n}
 
 incrementNumSims :: MCInfo -> MCInfo
 incrementNumSims NoMCInfo = NoMCInfo
@@ -1081,38 +1244,61 @@ storeHistoryInMCT :: History -> Tree
 -- does not pass in the current round to store in the MCT
 storeHistoryInMCT (History _ (cur:rest)) = undefined
 
-testG1 = GState 1 6 (HandInfo False False 10) (Just PStand)
-testG2 = GState 1 5 (HandInfo False False 9) (Just PHit)
-testG3 = GState 2 6 (HandInfo False False 8) (Just PHit)
-testG4 = GState 2 7 (HandInfo False False 10) (Just PStand)
+testG1 = GState 1 6 (HandInfo False False 10) (Just PStand) (Just Win)
+testG2 = GState 1 5 (HandInfo False False 9) (Just PHit) (Just Loss)
+testG3 = GState 2 6 (HandInfo False False 8) (Just PHit) (Just Draw)
+testG4 = GState 2 7 (HandInfo False False 10) (Just PStand) (Just Win)
 
 testGl = [testG1, testG2, testG3, testG4]
 
-testStoreMem = storePlayerMemInMCT testGl (Just (shorterTestMCT, []))
+-- testStoreMem = storeGameStateInMCT testGl (Just (shorterTestMCT, []))
 
+-- storeMemoryInMCT :: [[GameState]]
 
-storePlayerMemInMCT :: [GameState] -> Maybe Zipper -> Maybe Zipper
-storePlayerMemInMCT [] zipper = zipper -- if memory is empty, base case return accumulator
-storePlayerMemInMCT (cur:rest) (Just (t, _)) = do
+-- testStoreGState = storeGameStateInMCT testGl (Just (shorterTestMCT, []))
+testGStateForStore = GState 4 3 (HandInfo False False 19) (Just PStand) Nothing
+
+testStoreMemInMCT = do
+    (storedTree, _) <- storeMemoryInMCT =<< testAllConversion
+    gState <- testConversion
+    (tree, _) <- findSubTree testGStateForStore storedTree
+    pure tree
+    -- (\(tree, bs) ->findSubTree testConversion tree) =<< storeMemoryInMCT =<< testAllConversion
+
+-- MCTAction :: 
+
+storeMemoryInMCT :: [[GameState]] -> Maybe Zipper
+storeMemoryInMCT = foldr storeGameStateInMCT (Just (mct, []))
+
+storeGameStateInMCT :: [GameState] -> Maybe Zipper -> Maybe Zipper
+storeGameStateInMCT [] zipper = zipper -- if memory is empty, base case return accumulator
+storeGameStateInMCT (cur:rest) (Just (t, _)) = do
     zipperForThisMem <- findSubTree cur t
     updatedNodeSims <- modifyNode incrementNumSims zipperForThisMem -- num sims for that node + 1
-    updatedWins <- modifyNode incrementMCWins updatedNodeSims -- TODO: CHANGE TO MAKE IT BASED ON OUTCOME
+    rewardFunc <- rewardIncrement <$> gameOutcome cur
+    updatedWins <- modifyNode rewardFunc updatedNodeSims
     -- updatedLevelSims <- modifyAllInLevel updatedWins incrementNumSimsLevel
     let updatedTree = returnToRoot $ modifyAllInLevel updatedWins incrementNumSimsLevel
     -- let updatedTree = returnToRoot $ modifyNode incrementMCWins updatedNodeSims -- increment wins for that node
-    storePlayerMemInMCT rest updatedTree
-storePlayerMemInMCT _ _ = Nothing
+    storeGameStateInMCT rest updatedTree
+storeGameStateInMCT _ _ = Nothing
+
+rewardIncrement :: Outcome -> (MCInfo -> MCInfo)
+rewardIncrement gameOutcome = case gameOutcome of
+    Win -> incrementMCWins 1
+    Draw -> incrementMCWins 0.5
+    Loss -> incrementMCWins 0
 
 
 findSubTree :: GameState -> Tree -> Maybe Zipper
-findSubTree (GState d num hInfo Nothing) t = do
+findSubTree (GState d num hInfo Nothing _) t = do
     let startZ = (t, [])
     -- DONT FORGET TO UNCOMMENT ^
     -- let startZ = (shorterTestMCT, [])
     dealerZ <- findAtLevel (show d) startZ
     cardNumNode <- findAtLevel (show num) =<< moveLeft dealerZ
     findAtLevel (show hInfo) =<< moveLeft cardNumNode
-findSubTree (GState d num hInfo (Just act)) t = do
+findSubTree (GState d num hInfo (Just act) _) t = do
     let startZ = (t, [])
     -- DONT FORGET TO UNCOMMENT ^
     -- let startZ = (shorterTestMCT, [])
@@ -1122,11 +1308,12 @@ findSubTree (GState d num hInfo (Just act)) t = do
     findAtLevel (show act) =<< moveLeft cardValNode
 
 
-actionTreeToAction :: RoundMem -> Tree -> Maybe Action
+actionTreeToAction :: RoundMem -> Tree -> Maybe (Action, PureAction)
 actionTreeToAction _ None = Nothing
 actionTreeToAction rMem tree = do
     convertedPureAction <- charToPureAction $ head $ nid $ nodeInfo tree
-    pureActionToAction convertedPureAction $ roundBid rMem
+    convertedAction <- pureActionToAction convertedPureAction $ roundBid rMem
+    pure (convertedAction, convertedPureAction)
 
 
 testaf1 = do
@@ -1152,8 +1339,8 @@ modifyAllInPath f z = do
     modifyAllInPath f goUp
     -- pure modifiedNode
 
-testModTree = fromMaybe (None, []) $  findSubTree (GState 2 5 (HandInfo False False 9) (Just PStand)) shorterTestMCT
-testModifyAllInLevel = modifyAllInLevel testModTree incrementNumSimsLevel
+-- testModTree = fromMaybe (None, []) $  findSubTree (GState 2 5 (HandInfo False False 9) (Just PStand)) shorterTestMCT
+-- testModifyAllInLevel = modifyAllInLevel testModTree incrementNumSimsLevel
 
 -- assume given a node in that level itself
 modifyAllInLevel :: Zipper -> (MCInfo -> MCInfo) -> Maybe Zipper
@@ -1212,8 +1399,9 @@ findAndModify _ _ Nothing = Nothing
 
 -- TODO: CHANGE THE SHOW VAL CURHAND TO USE THE =<<, MAYBE TURN TO DO?
 findAndModifySome :: (MCInfo -> MCInfo) -> GameState -> Maybe Zipper -> Maybe Zipper
-findAndModifySome f state@(GState _ _ _ (Just act)) (Just (t, _)) = modifyNodeAndParents f (show act) =<< findSubTree state t
-findAndModifySome f state@(GState _ _ _ Nothing) (Just (t, _)) = Nothing
+findAndModifySome f state@GState{actionTaken=(Just act)} (Just (t,_)) = modifyNodeAndParents f (show act) =<< findSubTree state t
+-- findAndModifySome f state@(GState _ _ _ (Just act)) (Just (t, _)) = modifyNodeAndParents f (show act) =<< findSubTree state t
+findAndModifySome f GState{actionTaken=Nothing} (Just (t, _)) = Nothing
 findAndModifySome _ _ Nothing = Nothing
 
 -- testFM1 = extractRes $ findAndModifySome incrementMCWins $ GState 11 4 (HandInfo False False 20)
@@ -1224,7 +1412,7 @@ modifyOnData f = foldr (findAndModifySome f) (Just (shorterTestMCT, [])) -- REME
 
 -- testmODp1 = findAndModify 
 
-testmOD = modifyOnData incrementMCWins [GState 2 6 (HandInfo False False 9) (Just PStand),GState 2 5 (HandInfo False False 10) (Just PHit)]
+-- testmOD = modifyOnData incrementMCWins [GState 2 6 (HandInfo False False 9) (Just PStand),GState 2 5 (HandInfo False False 10) (Just PHit)]
 
 -- findAndModify4 = findAndModify incrementMCWins mockGSTate
 
@@ -1398,7 +1586,7 @@ chooseMaxUCBTree z1@(t1,_) z2@(t2,_)
 calcUCB :: Tree -> Maybe Statistic
 calcUCB tree = do
     let (MCInfo wins sims simsThisLevel) = mcInfo $ nodeInfo tree
-    exploitation <- safeDivInts wins sims
+        exploitation = wins / fromIntegral sims
     logRes <- safeLogInts simsThisLevel
     divRes <- safeDiv logRes $ fromIntegral sims
     sqrtRes <- safeSqrt divRes
@@ -1504,7 +1692,7 @@ explorationParam = sqrt 2
 -- data HandInfo = NoHandInfo | HandInfo {containsAce::Bool}
 
 data MCInfo = NoMCInfo | MCInfo {
-    wins :: Int, numSimsThisNode :: Int, numSimsSubtreeTotal :: Int } deriving (Eq)
+    wins :: Float, numSimsThisNode :: Int, numSimsSubtreeTotal :: Int } deriving (Eq)
 
 -- data NodeValue = Val Int | Act PureAction
 type NodeID = String
@@ -1565,7 +1753,8 @@ data GameState = GState {
     curDealerCard :: Int,
     cardNum :: Int,
     curHand :: HandInfo, -- should be smth like "4" or "4A" if has Ace
-    actionTaken :: Maybe PureAction
+    actionTaken :: Maybe PureAction,
+    gameOutcome :: Maybe Outcome
 }
 
 -- exGState = GState 3 3 (HandInfo 4 False)
@@ -1675,15 +1864,16 @@ instance Show Tree where
     show (Node c n) = "(\n" ++ show n ++ show c ++ ")\n"
 
 instance Show GameState where
-    show (GState d cNum hInfo act) =
+    show (GState d cNum hInfo act gameOutcome) =
         "Dealer: "++ show d
         ++ " Card num: " ++ show cNum
         ++ " Hand Info: " ++ show hInfo
-        ++ actStr act
+        ++ safeShow act " Action: "
+        ++ safeShow gameOutcome " Outcome: "
         where
-            actStr :: Maybe PureAction -> String
-            actStr (Just a) = " Action: " ++ show a
-            actStr Nothing = ""
+            safeShow :: Show a => Maybe a -> String -> String
+            safeShow (Just a) str = str ++ show a
+            safeShow Nothing _ = ""
 -- test2 = Node (Children test0 test1) (NodeInfo 4 5 6 NoHandInfo)
 
 
@@ -1744,7 +1934,7 @@ randomizeDeck :: RandState -> Int -> Stock
 randomizeDeck seed maxLen = map snd $ take len sortedRandDeck
     where
         next = nextRand seed
-        len = mod next maxLen
+        len = maxMod 10 next maxLen
         indices = foldr (\_ (prevSeed, previs) -> (nextRand prevSeed, prevSeed : previs)) (nextRand next, []) [1..length threeDecks]
         sortedRandDeck = sortOn fst $ zip (snd indices) threeDecks
 
@@ -1758,7 +1948,7 @@ randomizeDeck seed maxLen = map snd $ take len sortedRandDeck
 
 
 
-testTrickSim = [PlayNode (Play "99" 0 500 (Bid 100) "?40BDH" testHand) Nil]
+testTrickSim = [PlayNode (Play "99" 0 500 (Bid 100) "?40BP" []) Nil]
 
 -- testdef :: (HandResult, Trick, Card, Stock)
 -- testdef = ((HandResult [] []), [], (Card Spade Two), [])
@@ -1770,23 +1960,59 @@ testTrickSim = [PlayNode (Play "99" 0 500 (Bid 100) "?40BDH" testHand) Nil]
 
 get2nd (_,trick, _, _) = trick
 
-tstDeck = [Card Spade Two, Card Diamond Three, Card Heart Five, Card Diamond Six, Card Heart Three, Card Spade Ace]
+tstDeck = [Card Spade Two, Card Diamond Three, Card Heart Five, Card Diamond Two, Card Heart Five, Card Spade Ace,
+    Card Diamond Two, Card Spade Jack, Card Diamond Queen]
 
 -- testSim2 = runEitherIO $ runSimulation tstDeck [testTrickSim]
 
-setupSimulation :: RoundMem -> Stock -> Trick
-setupSimulation RoundM {roundBid, roundActions} stock = undefined
+testrMem1 = RoundM [PHit] [2, 4] [Two, Four] 100 69 2 Nothing
+testrMem2 = RoundM [PSplit, PHit] [2, 4] [Two, Four] 100 69 2 Nothing
 
-testRState = RoundM [PHit, PStand] [3, 6, 11] 1000 40 8 Nothing
+-- testSimSetup = setupSimulation testrMem1 PStand
+testSimOnce = simulateOnce testrMem1 PStand 241241324
+testSimMult = simulateNTimes 10 testrMem1 PStand 1212
+
+-- constant, simulation always starts with 1000 pts
+simStartPts :: Int
+simStartPts = 1000
+
+
+-- simulationToMemory :: [SimInfo] -> 
+
+simulateNTimes :: Int -> RoundMem -> PureAction -> RandState -> Maybe [SimInfo]
+simulateNTimes n rMem simAct seed =
+    sequence $ snd $ foldr (\_ (prevSeed, simInfos) -> (nextRand prevSeed, simulation prevSeed : simInfos)) (seed, []) [1..n]
+    where
+        simulation = simulateOnce rMem simAct -- partially applied, only requires seed
+
+simulateOnce :: RoundMem -> PureAction -> RandState -> Maybe SimInfo
+simulateOnce rMem actionToSimulate seed = do
+    simTrick <- generateSimTrick rMem actionToSimulate
+    simDeck <- recreateDeck rMem seed
+    getInfoFromSimulation $ runSimulation simDeck simTrick
+
+generateSimTrick :: RoundMem -> PureAction -> Maybe Trick
+generateSimTrick rMem@RoundM {roundBid, roundActions} act
+    | performedSplit rMem = Nothing
+    | otherwise =  Just simTrick
+    where
+        simActions = fold $ show <$> roundActions ++ [act]
+        simMem = "?" ++ show roundBid ++ "B" ++ simActions
+        simTrick = [PlayNode (Play "99" 0 500 (Bid 100) simMem []) Nil]
+
+
+testRState = RoundM [] [2,2] [Two, Two] 1000 40 8 Nothing
 testRecreateDeck = recreateDeck testRState 1231200
 
 
 recreateDeck :: RoundMem -> RandState -> Maybe Stock
-recreateDeck RoundM {roundHand, roundDealer} seed = do
-    (dealerUpCard : playerUpCards) <- sequence $ generateCardFromVal <$> (roundDealer : roundHand)
+recreateDeck RoundM {roundDealer, roundRanks} seed = do
+    dealerUpCard <- generateCardFromVal roundDealer
     dealerDownCard <- generateCardFromVal $ maxMod 1 seed 12
-    let randomizedRestDeck = randomizeDeck seed (length playerUpCards + 2)
-    pure $ dealerUpCard : dealerDownCard : playerUpCards ++ randomizedRestDeck
+    let playerCards = Card Spade <$> roundRanks -- again don't care about suit
+    -- (dealerUpCard : playerUpCards) <- sequence $ generateCardFromVal <$> (roundDealer : roundHand)
+        randomizedRestDeck = randomizeDeck seed (length playerCards + 2)
+    pure $ dealerUpCard : dealerDownCard : playerCards ++ randomizedRestDeck
     -- ranks <- sequence $ generateRankFromVal <$> (roundDealer : roundHand)
     -- let (dealerUpCard : playerUpCards) = generateCardFromRank <$> ranks
     -- let randDealerCard = 
@@ -1807,34 +2033,40 @@ generateCardFromRank = Card Spade
 generateRankFromVal :: Int -> Maybe Rank
 generateRankFromVal num = snd <$> find ((==num) . fst) valToRank
 
-data SimInfo = SimInfo {
-    simMemory :: Memory,
-    simResult :: Outcome
-} deriving (Show)
+-- data SimInfo = SimInfo {
+--     simMemory :: Memory,
+--     simResult :: Outcome
+-- } deriving (Show)
 
-testSimulation = runSimulation tstDeck testTrickSim
+type SimInfo = RoundMem
 
-testGetInfoFromSim = getInfoFromSimulation (runSimulation tstDeck testTrickSim) testRState
+-- testSimulation = runSimulation tstDeck testTrickSim
 
-getInfoFromSimulation :: Either GameError (HandResult, Trick, Card, Stock) -> RoundMem -> Maybe SimInfo
-getInfoFromSimulation (Left _) _ = Nothing
-getInfoFromSimulation (Right (res, trick, _, _)) RoundM{roundBid} = do
-    simMemory <- getSimMemory trick
-    let simOutcome = extractSimOutcome res roundBid
-    pure $ SimInfo simMemory simOutcome
+-- testGetInfoFromSim = getInfoFromSimulation (runSimulation tstDeck testTrickSim) testRState
+
+getInfoFromSimulation :: Either GameError (HandResult, Trick, Card, Stock) -> Maybe SimInfo
+getInfoFromSimulation (Left _) = Nothing
+getInfoFromSimulation (Right (res, trick, _, _)) = do
+    simMemory <- head <$> getSimMemory trick
+    let simOutcome = extractSimOutcome res
+        updatedSimMemory = simMemory {roundOutcome= Just simOutcome} -- update the roundOutcome with the result of the simulation
+    pure updatedSimMemory
 
 getSimMemory :: Trick -> Maybe Memory
-getSimMemory [_, playerTrick] =
-    trace ("PLAYER TRICK: " ++ show playerTrick)
+getSimMemory (dealer:players) =
+    -- trace ("PLAYER TRICK: " ++ show playerTrick ++ " \n" ++ 
+    --         "DEALER TRICK: " ++ show dealer)
     extractSimMemory playerTrick
+    where
+        playerTrick = last players
 getSimMemory _ = Nothing
 
 extractSimMemory :: PlayNode -> Maybe Memory
 extractSimMemory node = do
     memStr <- memory <$> nodeValue node
     index <- elemIndex '/' memStr
-    let useableMem = 
-            trace ("MEMORY STRING: " ++ memStr ++ " INDEX: " ++ show index)
+    let useableMem =
+            -- trace ("MEMORY STRING: " ++ memStr ++ " INDEX: " ++ show index)
             drop index memStr
     safeExtractParseResult $ parse strictParseAll useableMem
 
@@ -1842,15 +2074,17 @@ safeExtractParseResult :: ParseResult a -> Maybe a
 safeExtractParseResult (Result rest a) = Just a
 safeExtractParseResult (Error _) = Nothing
 
-extractSimOutcome :: HandResult -> Int ->Outcome
-extractSimOutcome HandResult{handPoints} startPts = outcome startPts $ getPoints $ head handPoints
+extractSimOutcome :: HandResult ->Outcome
+extractSimOutcome HandResult{handPoints} =
+    -- trace ("HANDRESULT: " ++ show handPoints )
+    outcome simStartPts $ getPoints $ head handPoints
 
 runSimulation :: Stock -> Trick -> Either GameError (HandResult, Trick, Card, Stock)
 -- Need to extract from the IO context because we are not doing any IO
 runSimulation deck trick = unsafePerformIO $ runEitherIO $ playHand deck trick simGamePoints
     where
         simPlayer = Player "99" playCard
-        simGamePoints = [GamePoints simPlayer $ Rich 1000]
+        simGamePoints = [GamePoints simPlayer $ Rich simStartPts]
 
 
 
@@ -1936,77 +2170,8 @@ nextRand prevSeed = (a*prevSeed + c) `mod` m
   where -- Parameters for linear congruential RNG.
     a = 1103515245
     c = 12345
-    m = 2^31
+    m = intPower 2 31
 
-
-
-
-------------------------------------
----------- FOR SIMULATION ----------
-------------------------------------
-
-
--- playHandSim
---     :: [Card]
---     -> Trick
---     -> [GamePoints]
---     -> Either GameError (HandResult, Trick, Card, Stock)
--- playHandSim deck prev scores = do
---     -- Deal cards, with shuffling
---     (dealt, stock) <- liftIO
---         $ dealContinuous numDecks startingNumCards (length scores + 1) deck
---     let dealerCards : playerCards = dealt
-
---     -- Separate rich and bankrupt players
---     let (rich, bankrupt) = partition (isRich . finalPoints) scores
---         order            = player <$> rich
-
---     -- Pre play - bids
---     (bidTrick, stock', bidGP  ) <- playBids prev stock rich order
-
---     -- Main play
---     (tricked , newGP , stock'') <- playTricks
---         (zipWith PlayerHand order playerCards)
---         stock'
---         dealerCards
---         prev
---         bidTrick
---         bidGP
-
---     (handPoints, dealerTrick, stock''') <- liftIO
---         $ evaluatePlays tricked stock'' dealerCards
-
---     -- Combine players
---     let resultPoints   = combinePoints handPoints newGP
---         pids           = sort $ getId <$> order
---         zeroPlayers    = HandPoints 0 . getId <$> bankrupt
---         nonZeroPlayers = zipWith HandPoints resultPoints pids
---         players        = nonZeroPlayers ++ zeroPlayers
---         results        = HandResult tricked players
-
---     return (results, dealerTrick : tricked, head dealerCards, stock''')
-
--- dealContinuousSim :: Int -> Int -> [Card] -> ([Hand], [Card])
--- dealContinuousSim n m deck = 
-
-
--- dealContinuousSim _ n m deck = do
---     -- Take from deck
---     let total       = m * n
---         numFromDeck = min total (length deck)
---         dealtCards  = take numFromDeck deck
---         deck'       = drop numFromDeck deck
---         remaining   = total - numFromDeck
-
---     -- Take more from deck after shuffling
---     newDeck <- genDeck deck'
---     let allDealtCards = dealtCards ++ take remaining newDeck
---         newDeck'      = drop remaining newDeck
---         finalDeal     = deal n m allDealtCards
-
---     return (finalDeal, newDeck')
-
---   where
---     genDeck :: [Card] -> IO [Card]
---     genDeck [] = shuffledDecks decksUsed
---     genDeck d  = return d
+-- helper for ^ so it doesnt have to infer type
+intPower :: Int -> Int -> Int
+intPower base pow = base ^ pow
