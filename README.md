@@ -2,6 +2,8 @@
 
 This project creates a bot to strategically play [BlackJack](https://en.wikipedia.org/wiki/Blackjack#Rules_of_play_at_casinos) using the [Monte-Carlo Tree Search (MCTS) algorithm](https://en.wikipedia.org/wiki/Monte_Carlo_tree_search). Written in Haskell.
 
+![Summary Tree and Memory](assets/tree_and_mem.png)
+
 ## Background
 
 I'm sure most people have played this popular game at least once in their lives but if not, the basic premise of the game is that the dealer will deal 2 cards to each player and 1 for themselves, all face up. Each player can decide to *Stand* (keep their current cards) or *Hit* (draw another card), and some other more complex actions. The goal of the player is to obtain a total card value exceeding the dealer's hand but not more than 21. If the player or the dealer gets a total card value exceeding 21, they immediately lose (*bust*).
